@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 dependencies = [
     "chromadb>=0.5",
     "sentence-transformers>=3.0",
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +23,7 @@ dev = [
 
 [project.scripts]
 cache-for-clankers = "cache_for_clankers.cli:main"
+cache-for-clankers-mcp = "cache_for_clankers.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

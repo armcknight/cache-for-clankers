@@ -9,97 +9,133 @@ compactions.
 
 ---
 
-## Features
+## Installing as a Claude plugin (MCP)
 
-| Capability | Description |
-|---|---|
-| **Local storage** | ChromaDB runs embedded in the same process — no external server required. |
-| **Semantic embeddings** | Text is embedded with [sentence-transformers](https://www.sbert.net/) (`all-MiniLM-L6-v2` by default). |
-| **Smart chunking** | Long texts are split into semantically coherent paragraph/sentence chunks before storage. |
-| **Deduplication** | Near-duplicate content (cosine similarity ≥ 0.92) is merged rather than stored twice, keeping the database lean. |
-| **Importance scoring** | Each chunk receives a heuristic importance score (vocabulary richness, structure, facts) used to re-rank retrieval results. |
-| **Contextual retrieval** | Results are ranked by a weighted blend of semantic similarity (70 %) and importance score (30 %). |
+`cache-for-clankers` ships an [MCP](https://modelcontextprotocol.io/) server
+so Claude Desktop can call it as a set of built-in tools.
 
----
-
-## Installation
+### 1 — Install the package
 
 ```bash
 pip install -e .
 ```
 
-> **Dependencies:** `chromadb>=0.5`, `sentence-transformers>=3.0`
-> (both are installed automatically).
+### 2 — Add it to Claude Desktop's config
+
+Open (or create) `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and add the
+server under `"mcpServers"`:
+
+```json
+{
+  "mcpServers": {
+    "cache-for-clankers": {
+      "command": "cache-for-clankers-mcp"
+    }
+  }
+}
+```
+
+Restart Claude Desktop. You will now see five new tools available inside Claude:
+`store_memory`, `retrieve_memories`, `list_memories`, `delete_memory`, and
+`count_memories`.
+
+### Optional environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CACHE_FOR_CLANKERS_DB_PATH` | `~/.cache/cache-for-clankers` | Path to the ChromaDB persistent store |
+| `CACHE_FOR_CLANKERS_COLLECTION` | `memories` | ChromaDB collection name |
+| `CACHE_FOR_CLANKERS_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers embedding model |
+
+Example with custom path:
+
+```json
+{
+  "mcpServers": {
+    "cache-for-clankers": {
+      "command": "cache-for-clankers-mcp",
+      "env": {
+        "CACHE_FOR_CLANKERS_DB_PATH": "/path/to/my/memory"
+      }
+    }
+  }
+}
+```
 
 ---
 
-## Quick start — Python API
+## Why the intelligence layer matters
+
+ChromaDB is an excellent general-purpose vector store, but it provides only
+**raw storage and similarity search**. By itself it will:
+
+- Store duplicate or near-duplicate content without merging it, wasting space
+  and polluting results with redundant entries.
+- Return results ranked purely by embedding similarity, with no concept of
+  *how dense* or *how informative* the stored text is.
+- Store long context blobs whole, making retrieval return a wall of text
+  rather than the precise relevant fragment.
+
+The intelligence layer adds three things ChromaDB does not:
+
+| Layer | What it does |
+|---|---|
+| **Semantic chunking** | Splits long texts on paragraph/sentence boundaries *before* embedding so that retrieval returns precise fragments, not walls of text |
+| **Importance scoring** | Assigns a 0-1 information-density score to each chunk (vocabulary richness + structure markers + numeric content) and uses it to *re-rank* retrieval results |
+| **Near-duplicate deduplication** | Before every write, checks cosine similarity against existing entries; if >= 0.92 it merges rather than inserts, keeping the store compact |
+
+---
+
+## MCP tools reference
+
+| Tool | Description |
+|---|---|
+| `store_memory(content, session_id?)` | Save an important piece of context. Chunks, deduplicates, and scores automatically. |
+| `retrieve_memories(query, n_results?, min_importance?)` | Semantic search re-ranked by similarity + importance. |
+| `list_memories(limit?)` | Browse all stored memories. |
+| `delete_memory(memory_id)` | Remove a specific memory by ID. |
+| `count_memories()` | How many memories are stored right now. |
+
+---
+
+## Python API
 
 ```python
 from cache_for_clankers import MemoryManager
 
-# Create (or reopen) a persistent memory store
 memory = MemoryManager(db_path="./my_memory")
 
-# --- At the end of a Claude session ---
+# End of session -- store context fragments
 ids = memory.store(
     "The user is Alice. She is a senior Python developer who prefers "
     "type-annotated code and dislikes JavaScript.",
     session_id="session-001",
 )
 
-# --- At the start of the next session ---
+# Start of next session -- retrieve relevant context
 results = memory.retrieve("What does the user prefer?", n_results=3)
 for r in results:
     print(f"[{r['similarity']:.2f}] {r['content']}")
 ```
 
-### Additional API methods
-
-```python
-# List everything stored
-for m in memory.list_all():
-    print(m["id"], m["content"][:80])
-
-# Delete a specific memory
-memory.delete(ids[0])
-
-# Count stored memories
-print(memory.count())
-```
-
 ---
 
-## Quick start — CLI
-
-After installation the `cache-for-clankers` command is available:
+## CLI
 
 ```bash
-# Store a memory (from a string or piped stdin)
-cache-for-clankers store "Alice prefers Python with type annotations."
+# Store from a string or piped stdin
+cache-for-clankers store "Alice prefers typed Python."
 echo "She dislikes JavaScript." | cache-for-clankers store
 
 # Retrieve relevant memories
 cache-for-clankers retrieve "What language does Alice prefer?" -n 5
-
-# Retrieve as JSON (useful for scripting)
 cache-for-clankers retrieve --json "Alice's preferences"
 
-# List all stored memories
+# Manage
 cache-for-clankers list
-cache-for-clankers list --json --limit 20
-
-# Delete a memory by ID
 cache-for-clankers delete <id>
-
-# Count memories
 cache-for-clankers count
-```
-
-Use `--db` and `--collection` to change where data is stored:
-
-```bash
-cache-for-clankers --db /path/to/db --collection project-x store "..."
 ```
 
 ---
@@ -107,26 +143,32 @@ cache-for-clankers --db /path/to/db --collection project-x store "..."
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│               MemoryManager (API)               │
-│  store()  retrieve()  delete()  list_all()      │
-└────────────┬────────────────────────────────────┘
-             │
-┌────────────▼────────────────────────────────────┐
-│          Intelligence Layer                     │
-│  chunk_text()  compute_importance()             │
-│  deduplicate_content()                          │
-└────────────┬────────────────────────────────────┘
-             │
-┌────────────▼────────────────────────────────────┐
-│          VectorStore (ChromaDB wrapper)         │
-│  add()  update()  query()  delete()  get_all()  │
-└────────────┬────────────────────────────────────┘
-             │
-┌────────────▼────────────────────────────────────┐
-│     ChromaDB (persistent, cosine-similarity)    │
-│     sentence-transformers  (all-MiniLM-L6-v2)   │
-└─────────────────────────────────────────────────┘
++--------------------------------------------------+
+|          MCP Server (Claude plugin)              |
+|  store_memory  retrieve_memories  list_memories  |
+|  delete_memory  count_memories                   |
++---------------------+----------------------------+
+                      |
++---------------------v----------------------------+
+|               MemoryManager (API)                |
+|  store()  retrieve()  delete()  list_all()       |
++---------------------+----------------------------+
+                      |
++---------------------v----------------------------+
+|          Intelligence Layer                      |
+|  chunk_text()  compute_importance()              |
+|  deduplicate_content()                           |
++---------------------+----------------------------+
+                      |
++---------------------v----------------------------+
+|          VectorStore (ChromaDB wrapper)          |
+|  add()  update()  query()  delete()  get_all()   |
++---------------------+----------------------------+
+                      |
++---------------------v----------------------------+
+|     ChromaDB (persistent, cosine-similarity)     |
+|     sentence-transformers  (all-MiniLM-L6-v2)    |
++--------------------------------------------------+
 ```
 
 ---
@@ -137,6 +179,3 @@ cache-for-clankers --db /path/to/db --collection project-x store "..."
 pip install -e ".[dev]"
 pytest
 ```
-
-Tests use an in-memory ChromaDB instance with a deterministic fake embedding
-function — no model downloads needed.

@@ -10,7 +10,7 @@ import pytest
 from cache_for_clankers.cli import main
 from cache_for_clankers.memory import MemoryManager
 from cache_for_clankers.store import VectorStore
-from tests.conftest import FakeEmbeddingFunction
+from conftest import FakeEmbeddingFunction
 
 
 @pytest.fixture()
